@@ -2,9 +2,12 @@ package data
 
 import (
 	"os"
+	"path/filepath"
 	"shark/ctx"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -36,7 +39,7 @@ func (v *parseValue) UnmarshalText(text []byte) error {
 }
 
 type parseEntry struct {
-	Date  date       `toml:"date"'`
+	Date  date       `toml:"date"`
 	Value parseValue `toml:"value"`
 	Title string     `toml:"title"`
 	Desc  string     `toml:"desc"`
@@ -83,4 +86,60 @@ func ParseFile(c *ctx.Ctx, path string) ([]Entry, error) {
 		return nil, err
 	}
 	return ParseString(c, string(text))
+}
+
+func ParseDirectory(c *ctx.Ctx, path string) ([]Entry, error) {
+	wg := new(sync.WaitGroup)
+
+	type Result struct {
+		Entries []Entry
+		Err     error
+	}
+	ch := make(chan Result)
+
+	dirWorker := func(path string) {
+		defer wg.Done()
+		entries, err := ParseDirectory(c, path)
+		ch <- Result{entries, err}
+	}
+
+	fileWorker := func(path string) {
+		defer wg.Done()
+		entries, err := ParseFile(c, path)
+		ch <- Result{entries, err}
+	}
+
+	dir, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, f := range dir {
+		if f.IsDir() {
+			wg.Add(1)
+			go dirWorker(f.Name())
+			continue
+		}
+		if filepath.Ext(f.Name()) == ".toml" {
+			wg.Add(1)
+			go fileWorker(f.Name())
+			continue
+		}
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	entries := make([]Entry, 0)
+
+	for r := range ch {
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		entries = slices.Concat(entries, r.Entries)
+	}
+
+	return entries, nil
 }
